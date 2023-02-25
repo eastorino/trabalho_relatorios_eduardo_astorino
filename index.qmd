@@ -1,0 +1,337 @@
+---
+title: "Trabalho final - Lâmina Nefin"
+author: "Eduardo Astorino"
+format: html
+html: 
+  mainfont: GungsuhChe
+editor: visual
+
+---
+
+```{r, echo = FALSE}
+#| include: false
+## Preambulo
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(data.table)
+library(formattable)
+library(kableExtra)
+
+## Endereco de dados
+dividend_path = "dados/Dividend Yield - Definitivo.xls"
+estrategia_path = "dados/Estratégias.xls"
+short_path = "dados/Short Interest.xls"
+vol_path = "dados/Volatilidades.xls"
+
+```
+
+```{r, echo = FALSE}
+#| include: false
+
+## Lendo as planilhas
+## Series temporais
+dividend = readxl::read_excel(path = dividend_path, sheet = 1)
+estrategias_diaria = readxl::read_excel(path = estrategia_path, sheet = 1)
+estrategias_semanal = readxl::read_excel(path = estrategia_path, sheet = 2)
+short = readxl::read_excel(path = short_path, sheet = 1)
+vol = readxl::read_excel(path = vol_path, sheet = 1)
+
+## Rankings
+dividend_bottom = readxl::read_excel(path = dividend_path, sheet = 2) |>
+  mutate(price_dividend = 1/(yield_ticker_week/100)) |>
+  select(ticker, ranking_bottom, price_dividend)
+
+dividend_top = readxl::read_excel(path = dividend_path, sheet = 3) |>
+  mutate(price_dividend = 1/(yield_ticker_week/100)) |>
+  select(ticker, ranking_top, price_dividend)
+
+ranking_short = readxl::read_excel(path = short_path, sheet = 2)
+ranking_short_diff = readxl::read_excel(path = short_path, sheet = 4)
+
+ranking_rental = readxl::read_excel(path = short_path, sheet = 3) |>
+  mutate(rental_100 = aluguel_semana / 100)
+
+ranking_rental_diff = readxl::read_excel(path = short_path, sheet = 5) |>
+  mutate(rental_100_diff = diff_aluguel/100)
+
+## Já no caso das estratégias nós precisamos construir retornos acumulados em 
+## diferentes horizontes
+
+market = select(estrategias_diaria, ano, mes, dia, data_s, market_padronizado)
+SMB    = select(estrategias_diaria, ano, mes, dia, data_s, SMB_padronizado)
+HML    = select(estrategias_diaria, ano, mes, dia, data_s, HML_padronizado)
+WML    = select(estrategias_diaria, ano, mes, dia, data_s, WML_padronizado)
+
+lista_fatores = list(market, SMB, HML, WML)
+
+## Datas para os enunciados de cada seção
+
+data_estrat = tail(market$data_s, 1) |>
+  dmy() |>
+  format("%d/%m/%Y")
+
+data_dividend = tail(dividend$data, 1) |>
+  format("%d/%m/%Y")
+
+data_short = tail(short$data, 1) |>
+  format("%d/%m/%Y")
+
+calcula_retornos = function(X){
+  
+  ## Vamos salvar as diferentes medidas de retorno em sumários para facilitar
+  ## a decisão de qual informação irá aparecer em cada tabela. A informação que 
+  ## queremos mostrar na tabela de estratégias depende do momento do ano. 
+  ## Por exempo, se o mês virou no fim de semana, o cálculo do acumulado no mês 
+  ## e na semana será o mesmo. Para evitar isso, precisamos seguir as 
+  ## seguintes regras:
+
+  ## - no começo do ano, enquanto ainda não temos um mês completo, o acumulado 
+  ##   anual precisa ser o do ano anterior
+  ## - Sempre que o mês possuir somente uma semana, o acumulado mensal precisa ser
+  ##   o do mês passado
+  
+  ## Para resolver todos esses problemas, basta checar se o retorno mensal é
+  ## igual ao anual, ou se o semanal é igual ao mensal etc., ou checar se ainda 
+  ## estamos na primeira semana do ano.
+
+  Y = X |>
+    mutate(data = lubridate::dmy(data_s),
+           semana = lubridate::week(data), 
+           r = X[,5]/lag(X[,5]) - 1,
+           log_r = log(1 + r))
+  
+  total = Y |>
+    summarize(total = exp(sum(log_r, na.rm = TRUE)) - 1)
+  
+  anual = Y |>
+    group_by(ano) |>
+    summarize(anual = exp(sum(log_r, na.rm = TRUE)) - 1) |>
+    ungroup()
+  
+  mensal = Y |>
+    group_by(ano, mes) |>
+    summarize(mensal = exp(sum(log_r, na.rm = TRUE)) - 1) |>
+    ungroup()
+  
+  semanal = Y |>
+    group_by(ano, semana) |>
+    summarize(semanal = exp(sum(log_r, na.rm = TRUE)) - 1) |>
+    ungroup()
+  
+  sumario = data.frame(total) |>
+    mutate(anual = ifelse(tail(mensal$mes, 1) == 1, 
+                          yes = head(tail(anual$anual,2),1), 
+                          no = tail(anual$anual,1)) , 
+           mensal = ifelse(tail(semanal$semanal, 1) == tail(mensal$mensal, 1), 
+                           yes = head(tail(mensal$mensal, 2), 1), 
+                           no = tail(mensal$mensal,1)), 
+           semanal = tail(semanal$semanal,1))
+  
+  #sumario = list(total, anual, mensal, semanal)
+  
+  return(sumario)  
+  
+}
+
+lista_estrategias = purrr::map(.x = lista_fatores, .f = calcula_retornos)
+
+## Isso finaliza o cálculo de todas as séries de tempo e estatísticas. Agora
+## vem a parte de deixar bonito no html para depois gerar um código em latex.
+
+```
+
+```{r, echo = FALSE}
+
+## Gráficos
+
+estrategias_semanal = estrategias_semanal |>
+  mutate(data_s = dmy(data_s)) |>
+  gather(key = fator, value = ret_acum, market_padronizado:WML_padronizado) |>
+  filter(data_s >= dmy("01/01/2012"))
+
+dividend = dividend |>
+  mutate(data = ymd(data)) |>
+  filter(data >= dmy("01/01/2009")) |>
+  mutate(yield_week = yield_week/100, 
+         media = mean(yield_week, na.rm=TRUE)) |>
+  filter(data >= dmy("01/01/2010")) |>
+  gather(key = serie, value = valores, yield_week:media)
+
+short = short |>
+  mutate(data = ymd(data), 
+         semana_si = semana_si/100, 
+         semana_aluguel = semana_aluguel/100) |>
+  gather(key = serie, value = valores, semana_si:semana_aluguel)
+
+```
+
+```{r, echo = FALSE}
+
+## Tabelas
+
+conteudo_estrategias = bind_rows(lista_estrategias) |>
+  select(semanal, mensal, anual, total) |>
+  transpose() |>
+  mutate(horizonte = c("Semana", 
+                       ifelse(lista_estrategias[[1]][3] == lista_estrategias[[1]][4], 
+                              yes = "Mês anterior", 
+                              no = "Mês atual"), 
+                       ifelse(tail(lista_fatores[[1]][2], 1) == 1, 
+                          yes = as.character(head(tail(lista_fatores[[1]][1],2), 1)), 
+                          no = as.character(tail(lista_fatores[[1]][1],1))) , 
+                       paste("2010", as.character(tail(lista_fatores[[1]][1], 1)), sep=" - "))) |>
+  select(horizonte, V1, V2, V3, V4)
+
+row.names(conteudo_estrategias) = c(conteudo_estrategias[1,1], conteudo_estrategias[2,1], 
+                                    conteudo_estrategias[3,1], conteudo_estrategias[4,1])
+
+```
+
+
+```{r, echo = FALSE}
+
+tabela_short_nivel = data.frame(ranking_short$ticker[1:5], 
+                          ranking_short$short_interest_semana[1:5], 
+                          ranking_rental$ticker[1:5], 
+                          ranking_rental$rental_100[1:5]) |>
+  `colnames<-`(c("V1", "V2", "V3", "V4")) |>
+  mutate(V2 = formattable::percent(V2, digits = 2), 
+         V4 = formattable::percent(V4, digits = 2))
+
+tabela_short_diff = data.frame(ranking_short_diff$ticker[1:5], 
+                               ranking_short_diff$diff_si[1:5], 
+                               ranking_rental_diff$ticker[1:5], 
+                               ranking_rental_diff$rental_100_diff[1:5]) |>
+  `colnames<-`(c("V1", "V2", "V3", "V4")) |>
+  mutate(V2 = formattable::percent(V2, digits = 2), 
+         V4 = formattable::percent(V4, digits = 2))
+
+```
+
+## Estratégias de Investimento (Long - Short) (02/01/2012 - `r data_estrat`)
+
+Em 02/jan/2012 foram (teoricamente) investidos R\$ 100 em 4 carteiras long-short tradicionais da literatura de Economia Financeira. O gráfico apresenta a evolução dos valores das carteiras. (1) Carteira de Mercado: comprada em ações e vendida na taxa de juros livre de risco; (2) Carteira Tamanho: comprada em ações de empresas pequenas e vendida em ações em empresas grandes; (3) Carteira Valor: comprada em ações de empresas com alta razão "valor contábil-valor de mercado" e vendida em ações de empresas com baixa razão; (4) Carteira Momento: comprada em ações de empresas vencedoras e vendida em ações de empresas perdedoras. Para detalhes, visite o site do NEFIN, seção "Fatores de Risco": <http://nefin.com.br/risk_factors.html>
+
+```{r, echo = FALSE}
+
+#| layout-ncol: 2
+
+ggplot(data = estrategias_semanal, aes(x = data_s)) + 
+  geom_line(aes(y = ret_acum, color = fator, size = fator)) +
+  scale_color_manual(values = c("#92D050", "#FF0000", "#4F81BD", "#000000"),
+                     labels = c("Valor", "Mercado", "Tamanho", "Momento"), 
+                     name = "") +
+  scale_size_manual(values = c(1.1, 1.1, 1.1, 1.1), name = "", 
+                    labels = c("Valor", "Mercado", "Tamanho", "Momento")) +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 45, vjust = 0.5) ,
+        panel.background = element_rect(fill = "white"), 
+        panel.border = element_rect(color = "black", fill = NA), 
+        panel.grid.major = element_line(linetype = "dashed", color = "black")) +
+  xlab(" ") + ylab(" ") + 
+  scale_y_continuous(breaks = seq(20, 780, by = 40)) + 
+  scale_x_date(date_breaks = "6 months", 
+               limits = c(dmy("01/01/2012"), NA) ,
+               expand = c(0,0))
+
+conteudo_estrategias |>
+  select(V1, V2, V3, V4) |> 
+  mutate(V1 = formattable::percent(V1, digits = 2), 
+         V2 = formattable::percent(V2, digits = 2), 
+         V3 = formattable::percent(V3, digits = 2), 
+         V4 = formattable::percent(V4, digits = 2)) |>
+  knitr::kable(col.names = c("Mercado", "Tamanho", "Valor", "Momento")) |>
+  kableExtra::kable_styling() |>
+  kableExtra::column_spec(1, bold = TRUE)
+
+```
+
+## Dividend Yield da Bolsa (01/01/2009 - `r data_dividend`)
+
+O gráfico acima apresenta a evolução histórica do ***dividend yield*** do mercado acionário brasileiro: razão entre o total pago de dividendos nos últimos 12 meses pelas empresas e o valor total das empresas hoje. Essa é tradicionalmente uma variável estacionária (reverte à média) e é positivamente correlacionada com o retorno futuro esperado dos investidores. Ou seja, é alta em momentos ruins (de alto risco ou alta aversão ao risco), quando os investidores exigem retorno esperado alto para investir no mercado, e baixa em momentos bons. A tabela apresenta o inverso do ***dividend yield***, conhecido como Razão Preço-Dividendo, de algumas empresas. Ordenam-se os papéis da última semana de acordo com essa medida e reportam-se os papéis com as dez maiores e dez menores Razões Preço-Dividendo.
+
+```{r, layout="[[1], [2,2]]", echo = FALSE}
+
+ggplot(data = dividend, aes(x = data, y = valores, color = serie, 
+                                       linetype = serie, size = serie)) + 
+  geom_line() +
+  scale_color_manual(values = c("#FF0000", "#000000"),
+                     labels = c("Média Histórica", "Dividend Yield"), 
+                     name = "") +
+  scale_linetype_manual(values = c("dashed", "solid"), 
+                        labels = c("Média Histórica", "Dividend Yield"), 
+                     name = "") +
+  scale_size_manual(values = c(1.1, 1.1), labels = c("Média Histórica", "Dividend Yield"), 
+                     name = "") + 
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 45, vjust = 0.5) ,
+        panel.background = element_rect(fill = "white"), 
+        panel.border = element_rect(color = "black", fill = NA), 
+        panel.grid.major = element_line(linetype = "dashed", color = "black")) +
+  xlab(" ") + ylab(" ") + 
+  scale_y_continuous(breaks = seq(0.01, 0.09, by = 0.01), labels = scales::label_percent()) + 
+  scale_x_date(date_breaks = "1 year", 
+               limits = c(dmy("01/01/2010"), NA) ,
+               expand = c(0,0))
+
+
+dividend_bottom[1:10,] |>
+  select(ticker, price_dividend) |>
+  knitr::kable(col.names = c("Papel", "Preço-Dividendo")) |>
+  kableExtra::kable_styling() |>
+  add_header_above(c("10 Maiores" = 2))
+
+dividend_top[1:10,] |> 
+  select(ticker, price_dividend) |>
+  knitr::kable(col.names = c("Papel", "Preço-Dividendo")) |>
+  kableExtra::kable_styling() |>
+  add_header_above(c("10 Menores" = 2))
+
+```
+
+## Mercado de Aluguel de Ações (01/01/2023 - `r data_short`)
+
+O gráfico apresenta a evolução histórica do ***short interest*** do mercado acionário brasileiro e a taxa média de aluguel de ações. O ***short interest*** de uma empresa é dado pela razão entre a quantidade de ações em aluguel e a quantidade de ações ***outstanding***. Mede assim o estoque de vendas à descoberto realizadas com as ações da empresa, tendendo a ser maior em momentos de expectativa de queda no valor da empresa. O ***short interest*** do mercado, apresentado no gráfico, é a média (ponderada por valor) dos ***short interest*** individuais. A tabela reporta os 5 maiores short interest individuais e taxas de aluguel da semana passada, tanto em nível como primeira diferença (no caso deste último, são excluídos os papéis que tiveram variação negativa).
+
+```{r, echo = FALSE, layout="[[1], [2,2]]"}
+
+ggplot(data = short, aes(x = data, y = valores, color = serie, 
+                                       linetype = serie, size = serie)) + 
+  geom_line() +
+  scale_color_manual(values = c("#FF0000", "#000000"),
+                     labels = c("Taxa de aluguel", "Short Interest"), 
+                     name = "") +
+  scale_linetype_manual(values = c("dashed", "solid"), 
+                        labels = c("Taxa de aluguel", "Short Interest"), 
+                     name = "") +
+  scale_size_manual(values = c(1.1, 1.1), labels = c("Taxa de aluguel", "Short Interest"), 
+                     name = "") + 
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 45, vjust = 0.5) ,
+        panel.background = element_rect(fill = "white"), 
+        panel.border = element_rect(color = "black", fill = NA), 
+        panel.grid.major = element_line(linetype = "dashed", color = "black")) +
+  xlab(" ") + ylab(" ") + 
+  scale_y_continuous(breaks = seq(0.00, 0.06, by = 0.005), 
+                     labels = scales::label_percent(), 
+                     sec.axis = dup_axis()) + 
+  scale_x_date(date_breaks = "6 months", 
+               limits = c(dmy("01/01/2013"), NA) ,
+               expand = c(0,0))
+
+ tabela_short_nivel |>
+   knitr::kable(col.names = c("","","","")) |>
+   kableExtra::kable_styling() |>
+   add_header_above(c("Short \n Interest" = 2, "Taxa \n de Aluguel" = 2)) |>
+   add_header_above(c("5 Maiores da Semana" = 4))
+ 
+ tabela_short_diff |>
+   knitr::kable(col.names = c("","","","")) |>
+   kableExtra::kable_styling() |>
+   add_header_above(c("Variação no Short Interest" = 2, "Variação na Taxa de Aluguel" = 2)) |>
+   add_header_above(c("5 Maiores da Semana" = 4))
+
+
+```
